@@ -1,6 +1,7 @@
 import os
 import sys
 import pandas as pd
+import numpy as np
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication,
@@ -40,6 +41,89 @@ from inquire_balance import inquire_balance
 from volume_rank import volume_rank
 from inquire_price import inquire_price
 import requests
+HOLDINGS_COLMAP = {
+    'pdno': '상품번호',
+    'prdt_name': '상품명',
+    'trad_dvsn_name': '매매구분명',
+    'bfdy_buy_qty': '전일매수수량',
+    'bfdy_sll_qty': '전일매도수량',
+    'thdt_buyqty': '금일매수수량',
+    'thdt_sll_qty': '금일매도수량',
+    'hldg_qty': '보유수량',
+    'ord_psbl_qty': '주문가능수량',
+    'pchs_avg_pric': '매입평균가격',
+    'pchs_amt': '매입금액',
+    'prpr': '현재가',
+    'evlu_amt': '평가금액',
+    'evlu_pfls_amt': '평가손익금액',
+    'evlu_pfls_rt': '평가손익율',
+    'evlu_erng_rt': '평가수익율',
+    'loan_dt': '대출일자',
+    'loan_amt': '대출금액',
+    'stln_slng_chgs': '대주매각대금',
+    'expd_dt': '만기일자',
+    'fltt_rt': '등락율',
+    'bfdy_cprs_icdc': '전일대비증감',
+    'item_mgna_rt_name': '종목증거금율명',
+    'grta_rt_name': '보증금율명',
+    'sbst_pric': '대용가격',
+}
+ACCOUNT_COLMAP = {
+    'dnca_tot_amt': '예수금총금액',
+    'nxdy_excc_amt': '익일정산금액',
+    'prvs_rcdl_excc_amt': '가수도정산금액',
+    'cma_evlu_amt': 'CMA평가금액',
+    'bfdy_buy_amt': '전일매수금액',
+    'bfdy_sll_amt': '전일매도금액',
+    'nxdy_auto_rdpt_amt': '익일자동상환금액',
+    'thdt_tlex_amt': '금일제비용금액',
+    'evlu_amt': '평가금액',
+    'evlu_pfls_amt': '평가손익금액',
+    'evlu_amt_smtl': '평가금액합계',
+    'evlu_amt_smtl_amt': '평가금액합계',
+    'evlu_pfls_amt_smtl': '평가손익금액합계',
+    'evlu_pfls_smtl_amt': '평가손익금액합계',
+    'nass_tot_amt': '순자산총금액',
+    'nass_amt': '순자산금액',
+    'tot_asst_amt': '총자산금액',
+    'pchs_amt': '매입금액',
+    'pchs_amt_smtl': '매입금액합계',
+    'pchs_amt_smtl_amt': '매입금액합계',
+    'real_nass_amt': '실제순자산금액',
+    'cma_auto_loan_amt': 'CMA자동대출금액',
+    'tot_mgln_amt': '총담보대출금액',
+    'crdt_fncg_amt': '신용융자금액',
+    'thdt_buy_amt': '금일매수금액',
+    'thdt_sll_amt': '금일매도금액',
+    'scts_evlu_amt': '유가평가금액',
+    'tot_evlu_amt': '총평가금액',
+    'tot_stln_slng_chgs': '총대주매각대금',
+    'bfdy_tot_asst_evlu_amt': '전일총자산평가금액',
+    'asst_icdc_amt': '자산증감금액',
+    'asst_icdc_erng_rt': '자산증감수익율',
+    'fncg_amt_auto_rdpt_yn': '융자금자동상환여부',
+}
+RANK_COLMAP = {
+    'hts_kor_isnm': 'HTS 한글 종목명',
+    'mksc_shrn_iscd': '유가증권 단축 종목코드',
+    'data_rank': '데이터 순위',
+    'stck_prpr': '현재가',
+    'prdy_vrss_sign': '전일 대비 부호',
+    'prdy_vrss': '전일 대비',
+    'prdy_ctrt': '등락률',
+    'acml_vol': '누적 거래량',
+    'prdy_vol': '전일 거래량',
+    'lstn_stcn': '상장주식수',
+    'avrg_vol': '평균 거래량',
+    'n_befr_clpr_vrss_prpr_rate': '전일종가 대비 현재가 비율',
+    'vol_inrt': '거래 증가율',
+    'vol_tnrt': '거래 회전율',
+    'nday_vol_tnrt': '최근N일 거래 회전율',
+    'avrg_tr_pbmn': '평균 거래대금',
+    'tr_pbmn_tnrt': '거래대금 회전율',
+    'nday_tr_pbmn_tnrt': '최근N일 거래대금 회전율',
+    'acml_tr_pbmn': '누적 거래대금',
+}
 
 
 class TradingApp(QWidget):
@@ -347,15 +431,60 @@ class TradingApp(QWidget):
             df = pd.DataFrame()
         if limit is not None:
             df = df.head(limit)
+        formatted = df.copy()
+        numeric_cols = []
+        exclude_cols = {
+            "pdno",
+            "상품번호",
+            "mksc_shrn_iscd",
+            "유가증권 단축 종목코드",
+        }
+        for col in formatted.columns:
+            if col in exclude_cols:
+                continue
+            series = formatted[col]
+            coerced = pd.to_numeric(series.astype(str).str.replace(",", ""), errors="coerce")
+            if coerced.notna().sum() > 0:
+                numeric_cols.append(col)
+                def _fmt(x):
+                    if pd.isna(x):
+                        return ""
+                    y = float(x)
+                    if y.is_integer():
+                        return f"{y:,.0f}"
+                    s = f"{y:,.2f}"
+                    if s.endswith(".00"):
+                        s = s[:-3]
+                    return s
+                formatted[col] = coerced.apply(_fmt)
         table.clear()
-        table.setRowCount(len(df))
-        table.setColumnCount(len(df.columns))
-        table.setHorizontalHeaderLabels([str(c) for c in df.columns])
-        for r in range(len(df)):
-            for c in range(len(df.columns)):
-                val = "" if pd.isna(df.iloc[r, c]) else str(df.iloc[r, c])
-                table.setItem(r, c, QTableWidgetItem(val))
+        table.setRowCount(len(formatted))
+        table.setColumnCount(len(formatted.columns))
+        table.setHorizontalHeaderLabels([str(c) for c in formatted.columns])
+        for r in range(len(formatted)):
+            for c in range(len(formatted.columns)):
+                val = "" if pd.isna(formatted.iloc[r, c]) else str(formatted.iloc[r, c])
+                item = QTableWidgetItem(val)
+                if formatted.columns[c] in numeric_cols:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(r, c, item)
         table.resizeColumnsToContents()
+    
+    def apply_korean_labels(self, df: pd.DataFrame, kind: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        if kind == "account":
+            mapping = ACCOUNT_COLMAP
+        elif kind == "holdings":
+            mapping = HOLDINGS_COLMAP
+        elif kind == "rank":
+            mapping = RANK_COLMAP
+        else:
+            mapping = {}
+        use_map = {k: v for k, v in mapping.items() if k in df.columns}
+        return df.rename(columns=use_map)
 
     def on_refresh_account(self):
         trenv = ka.getTREnv()
@@ -389,6 +518,7 @@ class TradingApp(QWidget):
                     self.df_to_table(r2, self.account_table)
                 self.backoff_reauth_and_retry(retry)
                 return
+            df2 = self.apply_korean_labels(df2, "account")
             self.df_to_table(df2, self.account_table)
         except Exception as e:
             self.df_to_table(pd.DataFrame({"error": [str(e)]}), self.account_table)
@@ -425,6 +555,7 @@ class TradingApp(QWidget):
                     self.df_to_table(r1, self.holdings_table)
                 self.backoff_reauth_and_retry(retry)
                 return
+            df1 = self.apply_korean_labels(df1, "holdings")
             self.df_to_table(df1, self.holdings_table)
         except Exception as e:
             self.df_to_table(pd.DataFrame({"error": [str(e)]}), self.holdings_table)
@@ -462,6 +593,7 @@ class TradingApp(QWidget):
                     self.df_to_table(r, self.rank_table, limit=20)
                 self.backoff_reauth_and_retry(retry)
                 return
+            df = self.apply_korean_labels(df, "rank")
             self.df_to_table(df, self.rank_table, limit=20)
         except Exception as e:
             self.df_to_table(pd.DataFrame({"error": [str(e)]}), self.rank_table)
