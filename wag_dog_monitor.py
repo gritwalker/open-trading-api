@@ -6,6 +6,7 @@ import requests
 import pandas as pd
 import logging
 import threading
+import csv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = BASE_DIR
@@ -48,6 +49,15 @@ def _now_hm():
 def _in_window():
     hm = _now_hm()
     return 900 <= hm <= 1030
+
+def _get_threshold_by_time(base_th: float) -> float:
+    hm = _now_hm()
+    if 900 <= hm < 930:
+        return base_th * 1.3
+    elif 930 <= hm < 1000:
+        return base_th * 1.1
+    else:
+        return base_th
 
 def _tg_send(text: str):
     tok = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -122,6 +132,15 @@ class Monitor:
         self.entry_nabt = None
         self._last_min = None
         self._last_when = None
+        self.basis_history = []
+        self.consecutive_losses = 0
+        self.max_hold_time = 90
+        self.entry_time = None
+        self._log_path = os.path.join(PROJECT_ROOT, "logs", "wagdog_trades.csv")
+        try:
+            os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
+        except Exception:
+            pass
 
     def _state_log(self, when: str):
         b = "-" if self.last_basis is None else f"{self.last_basis:.2f}"
@@ -149,6 +168,9 @@ class Monitor:
                 if bcol:
                     try:
                         self.last_basis = float(pd.to_numeric(result[bcol], errors="coerce").dropna().iloc[-1])
+                        self.basis_history.append((time.time(), self.last_basis))
+                        if len(self.basis_history) > 600:
+                            self.basis_history = self.basis_history[-600:]
                     except Exception:
                         pass
                 if self.last_basis is not None and _in_window():
@@ -169,21 +191,74 @@ class Monitor:
                     self._last_min = min_key
                     self._state_log(when)
                 if (self.last_basis is not None and self.last_nabt_ntby is not None):
-                    if (not self.has_position) and self.last_basis >= self.basis_th and self.last_nabt_ntby >= self.nabt_ntby_th:
+                    dyn_th = _get_threshold_by_time(self.basis_th)
+                    rising = self._is_basis_rising(3)
+                    if (not self.has_position) and self.last_basis >= dyn_th and self.last_nabt_ntby >= self.nabt_ntby_th and rising:
                         logger.info(f"✅ 매수 신호: 베이시스 {self.last_basis:.2f} (기준 {self.basis_th:.2f}), 비차익 순매수 {int(self.last_nabt_ntby)} (기준 {self.nabt_ntby_th})")
                         _tg_send(f"매수 신호: 베이시스 {self.last_basis:.2f}, 비차익 순매수 {int(self.last_nabt_ntby)}")
                         self.has_position = True
                         self.entry_basis = self.last_basis
                         self.entry_nabt = self.last_nabt_ntby
+                        self.entry_time = time.time()
+                        self._log_trade("ENTRY", when, self.entry_basis, self.entry_nabt)
                     elif self.has_position:
                         exit_by_basis = (self.last_basis < max(0.05, self.basis_th * 0.7))
                         exit_by_nabt = (self.last_nabt_ntby < self.nabt_ntby_th * 0.6)
+                        if self.last_basis is not None and self.last_basis < -0.05:
+                            logger.info(f"🚨 긴급 손절: 역베이시스 {self.last_basis:.2f}")
+                            _tg_send("🚨 긴급 손절")
+                            self._exit_position(False)
+                            return
+                        if self.has_position and self.entry_time:
+                            hold_minutes = (time.time() - self.entry_time) / 60
+                            if hold_minutes > self.max_hold_time:
+                                logger.info(f"⏰ 시간 초과 청산 ({hold_minutes:.0f}분)")
+                                self._exit_position(False)
+                                return
                         if exit_by_basis or exit_by_nabt:
                             logger.info(f"📤 매도 신호: 기준 이탈 (베이시스 {self.last_basis:.2f}, 비차익 순매수 {int(self.last_nabt_ntby)})")
                             _tg_send(f"매도 신호: 베이시스 {self.last_basis:.2f}, 비차익 순매수 {int(self.last_nabt_ntby)}")
-                            self.has_position = False
-                            self.entry_basis = None
-                            self.entry_nabt = None
+                            self._exit_position(self.last_basis >= self.entry_basis if self.entry_basis is not None else False)
+                if self.has_position and _now_hm() > 1030:
+                    logger.info("🔔 10:30 이후 강제 청산")
+                    self._exit_position(False)
+        except Exception:
+            pass
+    def _is_basis_rising(self, window_minutes: int = 3) -> bool:
+        if len(self.basis_history) < 2:
+            return False
+        cutoff = time.time() - (window_minutes * 60)
+        recent = [b for t, b in self.basis_history if t > cutoff]
+        if len(recent) < 2:
+            return False
+        return recent[-1] > recent[0]
+    def _exit_position(self, profit: bool):
+        if self.has_position:
+            self._log_trade("EXIT", self._last_when or datetime.now().strftime("%H:%M:%S"), self.last_basis, self.last_nabt_ntby, profit)
+        self.has_position = False
+        self.entry_basis = None
+        self.entry_nabt = None
+        self.entry_time = None
+        if not profit:
+            self.consecutive_losses += 1
+            if self.consecutive_losses >= 2:
+                logger.info("🛑 2연속 손실로 매매 중단")
+                _tg_send("매매 중단: 2연속 손실")
+                try:
+                    sys.exit(0)
+                except SystemExit:
+                    pass
+        else:
+            self.consecutive_losses = 0
+    def _log_trade(self, action: str, when: str, basis: float | None, nabt: float | None, profit: bool | None = None):
+        try:
+            row = [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), action, when, f"{basis:.4f}" if basis is not None else "", int(nabt) if nabt is not None else "", "1" if profit else "0" if profit is not None else ""]
+            newfile = not os.path.exists(self._log_path)
+            with open(self._log_path, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if newfile:
+                    w.writerow(["ts", "action", "when", "basis", "nabt_ntby", "profit"])
+                w.writerow(row)
         except Exception:
             pass
 
