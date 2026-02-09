@@ -90,6 +90,23 @@ def _get_latest_futures_code() -> str:
         logger.info(f"❌ 종목 코드 자동 조회 실패: {e}")
     return "101S12"
 
+def _resolve_futures_name(code: str) -> str | None:
+    try:
+        from examples_llm.domestic_futureoption.display_board_futures.display_board_futures import display_board_futures
+        df = display_board_futures("F", "20503", "MKI")
+        if df is None or df.empty:
+            return None
+        code_col = "futs_shrn_iscd" if "futs_shrn_iscd" in df.columns else None
+        name_col = "hts_kor_isnm" if "hts_kor_isnm" in df.columns else None
+        if code_col is None or name_col is None:
+            return None
+        df = df.copy()
+        hit = df[df[code_col].astype(str) == str(code)]
+        if not hit.empty:
+            return str(hit.iloc[0][name_col]).strip()
+        return None
+    except Exception:
+        return None
 class Monitor:
     def __init__(self, fut_code: str, idx_keys: list[str], basis_th: float = 0.20, nabt_ntby_th: int = 1500):
         self.fut_code = fut_code
@@ -192,7 +209,9 @@ def main():
     heartbeat = int(os.environ.get("HEARTBEAT_SEC", "60"))
     mon = Monitor(fut_code, idx_keys, basis_th, nabt_ntby_th)
     kws = ka.KISWebSocket(api_url="/tryitout")
-    logger.info(f"🔌 구독 요청: 지수선물 체결({fut_code}), 지수 프로그램매매({', '.join(idx_keys)})")
+    nm = _resolve_futures_name(fut_code)
+    disp = f"{nm}({fut_code})" if nm else fut_code
+    logger.info(f"🔌 구독 요청: 지수선물 체결({disp}), 지수 프로그램매매({', '.join(idx_keys)})")
     _start_heartbeat(mon, heartbeat)
     kws.subscribe(request=index_futures_realtime_conclusion, data=[fut_code])
     kws.subscribe(request=index_program_trade, data=idx_keys)

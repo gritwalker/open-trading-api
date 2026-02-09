@@ -90,17 +90,34 @@ def _easy_msg(now: str, code: str, pct: float, lev: float) -> str:
         f"주의: 9:00 이후는 장중 수급 영향"
     )
 
-def _fallback_pct_via_board() -> tuple[float | None, str | None]:
+def _resolve_fut_name(code: str) -> str | None:
     try:
         df = display_board_futures("F", "20503", "MKI")
         if df is None or df.empty:
-            return None, None
+            return None
+        code_col = "futs_shrn_iscd" if "futs_shrn_iscd" in df.columns else None
+        name_col = "hts_kor_isnm" if "hts_kor_isnm" in df.columns else None
+        if code_col is None or name_col is None:
+            return None
+        df = df.copy()
+        hit = df[df[code_col].astype(str) == str(code)]
+        if not hit.empty:
+            return str(hit.iloc[0][name_col]).strip()
+        return None
+    except Exception:
+        return None
+
+def _fallback_pct_via_board() -> tuple[float | None, str | None, str | None]:
+    try:
+        df = display_board_futures("F", "20503", "MKI")
+        if df is None or df.empty:
+            return None, None, None
         code_col = "futs_shrn_iscd" if "futs_shrn_iscd" in df.columns else None
         pct_col = "futs_prdy_ctrt" if "futs_prdy_ctrt" in df.columns else None
         name_col = "hts_kor_isnm" if "hts_kor_isnm" in df.columns else None
         vol_col = "acml_vol" if "acml_vol" in df.columns else None
         if code_col is None or pct_col is None:
-            return None, None
+            return None, None, None
         df = df.copy()
         mask = df[code_col].astype(str).str.startswith("101")
         cand = df[mask]
@@ -111,7 +128,36 @@ def _fallback_pct_via_board() -> tuple[float | None, str | None]:
             cand = cand.sort_values(vol_col, ascending=False)
         pct = float(pd.to_numeric(cand[pct_col], errors="coerce").dropna().iloc[0])
         code = str(cand.iloc[0][code_col])
-        return pct, code
+        nm = None
+        if name_col and name_col in cand.columns:
+            nm = str(cand.iloc[0][name_col]).strip()
+        return pct, code, nm
+    except Exception:
+        return None, None, None
+
+def _auto_futures_code() -> tuple[str | None, str | None]:
+    try:
+        df = display_board_futures("F", "20503", "MKI")
+        if df is None or df.empty:
+            return None, None
+        code_col = "futs_shrn_iscd" if "futs_shrn_iscd" in df.columns else None
+        name_col = "hts_kor_isnm" if "hts_kor_isnm" in df.columns else None
+        vol_col = "acml_vol" if "acml_vol" in df.columns else None
+        if code_col is None:
+            return None, None
+        df = df.copy()
+        mask = df[code_col].astype(str).str.startswith("101")
+        cand = df[mask]
+        if cand.empty:
+            cand = df
+        if vol_col and vol_col in cand.columns:
+            cand[vol_col] = pd.to_numeric(cand[vol_col], errors="coerce")
+            cand = cand.sort_values(vol_col, ascending=False)
+        code = str(cand.iloc[0][code_col])
+        nm = None
+        if name_col and name_col in cand.columns:
+            nm = str(cand.iloc[0][name_col]).strip()
+        return code, nm
     except Exception:
         return None, None
 
@@ -221,7 +267,14 @@ def main():
     env = os.environ.get("KIS_ENV", "real")
     ka.auth(svr="vps" if env == "demo" else "prod")
     ka.auth_ws()
-    code = os.environ.get("NGT_FUT_CODE", "101W9000").strip()
+    code = os.environ.get("NGT_FUT_CODE", "").strip()
+    name = None
+    if not code:
+        acode, aname = _auto_futures_code()
+        code = acode or "101W9000"
+        name = aname
+    if not name:
+        name = _resolve_fut_name(code)
     lev = float(os.environ.get("LEV_MULT", "2"))
     timeout = int(os.environ.get("SYNC_TIMEOUT_SEC", "30"))
     pre_codes = [x.strip() for x in os.environ.get("PREOPEN_CODES", "").split(",") if x.strip()]
@@ -230,9 +283,10 @@ def main():
     def on_timeout():
         if not sent["done"]:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            fpct, fcode = _fallback_pct_via_board()
+            fpct, fcode, fname = _fallback_pct_via_board()
             if fpct is not None and fcode:
-                msg = _easy_msg(now, fcode, fpct, lev) + "\n(야간 데이터 지연으로 전광판 대체값 사용)"
+                show = f"{fname}({fcode})" if fname else fcode
+                msg = _easy_msg(now, show, fpct, lev) + "\n(야간 데이터 지연으로 전광판 대체값 사용)"
                 _tg_send(msg)
                 print(msg)
                 if pre_codes:
@@ -262,7 +316,8 @@ def main():
                 except Exception:
                     return
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                msg = _easy_msg(now, code, pct, lev)
+                show = f"{name}({code})" if name else code
+                msg = _easy_msg(now, show, pct, lev)
                 _tg_send(msg)
                 print(msg)
                 if pre_codes:
